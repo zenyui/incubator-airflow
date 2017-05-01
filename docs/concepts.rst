@@ -756,6 +756,8 @@ to the related tasks in Airflow.
 This content will get rendered as markdown respectively in the "Graph View" and
 "Task Details" pages.
 
+.. _jinja-templating:
+
 Jinja Templating
 ================
 
