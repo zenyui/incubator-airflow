@@ -13,7 +13,9 @@
 # limitations under the License.
 #
 
+import base64
 import logging
+import os
 import requests
 
 from airflow import __version__
@@ -31,7 +33,11 @@ except ImportError:
 SUBMIT_RUN_ENDPOINT = ('POST', 'api/2.0/jobs/runs/submit')
 GET_RUN_ENDPOINT = ('GET', 'api/2.0/jobs/runs/get')
 CANCEL_RUN_ENDPOINT = ('POST', 'api/2.0/jobs/runs/cancel')
+WORKSPACE_MKDIRS_ENDPOINT = ('POST', 'api/2.0/workspace/mkdirs')
+WORKSPACE_IMPORT_ENDPOINT = ('POST', 'api/2.0/workspace/import')
+WORKSPACE_DELETE_ENDPOINT = ('POST', 'api/2.0/workspace/delete')
 USER_AGENT_HEADER = {'user-agent': 'airflow-{v}'.format(v=__version__)}
+
 
 
 class DatabricksHook(BaseHook):
@@ -159,6 +165,123 @@ class DatabricksHook(BaseHook):
     def cancel_run(self, run_id):
         json = {'run_id': run_id}
         self._do_api_call(CANCEL_RUN_ENDPOINT, json)
+
+    def workspace_mkdirs(self, path):
+        """
+        create dir in databricks
+        https://docs.databricks.com/api/latest/workspace.html#mkdirs
+
+        : param path: the absolute path of the directory to create (will create
+            intermediate directories too)
+        : type path: string
+        : return: None
+        : rtype: None
+        """
+
+        body = {'path': path}
+        self.log.info('creating path: {}'.format(path))
+        _ = self._do_api_call(WORKSPACE_MKDIRS_ENDPOINT, json=body)
+
+    def workspace_delete(self, path, recursive=False):
+        """
+        delete dir and recursively delete children - cannot be undone
+        https://docs.databricks.com/api/latest/workspace.html#delete
+
+        : param path: the path to delete.
+        : type path: string
+        : param recursive: delete recursively -- NOTE: This is not atomic
+        : type recursive: bool
+        : return: None
+        : rtype: None
+        """
+
+        body = {'path': path, 'recursive': recursive}
+        self.log.info('deleting path: {}'.format(path))
+        _ = self._do_api_call(WORKSPACE_DELETE_ENDPOINT, json=body)
+
+    def upload_notebook(self, source_path, dest_path, export_format, 
+                        notebook_language, overwrite):
+        """
+        upload notebook from local file
+        https://docs.databricks.com/api/latest/workspace.html#import
+
+        : param source_path: the local file path (absolute or relative to python
+            working directory)
+        : type source_path: string
+
+        : param dest_path: the destination workspace path (absolute)
+        : type dest_path: string
+
+        : param export_format: the file format to be imported
+            (https://docs.databricks.com/api/latest/workspace.html#notebookexportformat)
+        : type export_format: string
+        
+        : param notebook_language: the notebook language 
+            (https://docs.databricks.com/api/latest/workspace.html#language)
+        : type notebook_language: string
+
+        : param overwrite: The flag that specifies whether to overwrite 
+            existing object
+        : type overwrite: bool
+
+        : return: None
+        : rtype: None
+        """
+
+        if not os.path.exists(source_path):
+            err_msg = 'could not find notebook: "{}"'.format(source_path)
+            raise AirflowException(err_msg)
+
+        with open(source_path, 'rb') as f:
+            notebook_data = base64.b64encode(f.read()).decode('ascii')
+
+        body = {
+            "content": notebook_data,
+            "path": dest_path,
+            "language": notebook_language,
+            "overwrite": overwrite,
+            "format": export_format,
+        }
+
+        self.log.info('uploading notebook: {}'.format(source_path))
+        self.log.info('destination path: {}'.format(dest_path))
+
+        # throw away response
+        _ = self._do_api_call(WORKSPACE_IMPORT_ENDPOINT, json=body)
+
+
+    def run_notebook_existing_cluster(self, existing_cluster_id, run_name, 
+            notebook_path, notebook_params=None, polling_period_seconds=30):
+        '''
+        Run a notebook on an existing cluster. This method emulates the
+        DatabricksSubmitRunOperator.execute() method, but moves the functionality
+        to a hook so it can be leveraged by the PythonOperator in more complex
+        workflows (like uploading a temporary notebok and running it).
+
+        https://github.com/apache/incubator-airflow/blob/master/airflow/contrib/operators/databricks_operator.py
+        '''
+
+        # handle empty params
+        if not notebook_params: notebook_params = {}
+
+        assert isinstance(notebook_params, dict), 'note_params must be type dict'
+
+        # build request body
+        body = {
+            "run_name": run_name,
+            'existing_cluster_id': existing_cluster_id,
+            'notebook_task': {
+                'notebook_path': notebook_path,
+                'base_parameters': {k: str(v) for k, v in notebook_params.items()},
+            }
+        }
+
+        # submit run job
+        run_id = self.submit_run(json=body)
+
+        # get the running page url
+        run_page_url = self.get_run_page_url(run_id)
+        self.log.info('run page url: {}'.format(run_page_url))
 
 
 RUN_LIFE_CYCLE_STATES = [
